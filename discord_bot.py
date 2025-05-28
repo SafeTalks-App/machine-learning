@@ -13,12 +13,6 @@ load_dotenv()
 
 # Ambil variabel dari environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_KEY = os.getenv("API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-print("Bot token:", BOT_TOKEN)
-print("API Key:", API_KEY)
-print("Database URL:", DATABASE_URL)
 
 # Bot setup
 intents = discord.Intents.default()
@@ -130,4 +124,4 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # Run bot
-bot.run(API_KEY)
+bot.run(BOT_TOKEN)
