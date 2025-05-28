@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Jupyter Notebook checkpoints saja yang di-ignore
+.ipynb_checkpoints/
+
+# Environment files
+*.env
+
+# IDE config
+.idea/
+.vscode/
+
+# Logs
+*.log
