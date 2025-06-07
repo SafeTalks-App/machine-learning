@@ -12,7 +12,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 # Suppress TensorFlow Lite deprecation warning
 warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow.lite.python.interpreter")
 
-# Slang normalization dictionary (from training script)
+# Slang normalization dictionary
 slang_dict = {
     'wtf': 'what the fuck', 'lol': 'laughing out loud', 'fr': 'for real', 'tbh': 'to be honest',
     'fucking': 'fuckin', 'fuckinng': 'fuckin', 'ur': 'your', 'r': 'are',
@@ -22,7 +22,7 @@ slang_dict = {
     'slaps': 'great', 'cap': 'lie', 'bet': 'okay'
 }
 
-# Clean text function (from training script)
+# Clean text function
 def clean_text(text):
     if pd.isna(text) or not isinstance(text, str):
         return ''
@@ -43,17 +43,16 @@ except FileNotFoundError:
     print("Error: tokenizer.pkl not found. Ensure the training script has run successfully.")
     exit(1)
 
-# Configuration (from training script)
+# Configuration
 max_length = 30
 vocab_size = 20000
-batch_size = 512  # Model expects this batch size
 
 # Load TFLite model
 try:
-    interpreter = tf.lite.Interpreter(model_path='model/lstm/tflite_model.tflite')
+    interpreter = tf.lite.Interpreter(model_path='model/lstm/lstm_model.tflite')
     interpreter.allocate_tensors()
 except ValueError as e:
-    print(f"Error: Failed to load tflite_model.tflite. Ensure the training script has run successfully. Details: {e}")
+    print(f"Error: Failed to load lstm_model.tflite. Ensure the training script has run successfully. Details: {e}")
     exit(1)
 
 # Get input and output details
@@ -62,78 +61,29 @@ output_details = interpreter.get_output_details()
 
 # Prediction function
 def predict_text(text, true_label=None):
-    # Preprocess and tokenize
     cleaned_text = clean_text(text)
     sequence = tokenizer.texts_to_sequences([cleaned_text])
     padded = np.clip(pad_sequences(sequence, maxlen=max_length, padding='post', truncating='post'), 0, vocab_size - 1)
-    
-    # Pad batch dimension to match model's expected batch_size
-    padded_batch = np.repeat(padded, batch_size, axis=0)
-    
-    # Set inputs
-    interpreter.set_tensor(input_details[0]['index'], padded_batch.astype(np.float32))
-    
-    # Run inference
+    interpreter.set_tensor(input_details[0]['index'], padded.astype(np.float32))
     interpreter.invoke()
-    
-    # Get output (take first prediction)
     probs = interpreter.get_tensor(output_details[0]['index'])[0]
-    
-    class_names = ['Hate', 'Offensive', 'Neither']
+    class_names = ['Hate Speech', 'Offensive', 'Neither']
     pred_class = class_names[np.argmax(probs)]
     confidence = probs[np.argmax(probs)]
-    
-    # Flag low-confidence predictions
     if confidence < 0.5:
         print(f"Warning: Low confidence prediction ({confidence:.4f}) for '{text}'")
-    
     return {
         'input': text,
         'cleaned': cleaned_text,
         'predicted_class': pred_class,
+        'predicted_index': np.argmax(probs),
         'confidence': float(confidence),
-        'scores': {'Hate': float(probs[0]), 'Offensive': float(probs[1]), 'Neither': float(probs[2])},
-        'true_label': class_names[true_label] if true_label is not None else None
+        'scores': {'Hate Speech': float(probs[0]), 'Offensive': float(probs[1]), 'Neither': float(probs[2])},
+        'true_label': class_names[true_label] if true_label is not None else None,
+        'true_index': true_label
     }
 
-# Test texts (unlabeled, merged from both scripts)
-test_texts = [
-    "omg beautiful", "amazing", "holy", "omg", "bastard",
-    "hello guys im here", "great bro", "nigger", "youre a pathetic loser",
-    "lets go", "are you serious", "wtf", "lets fuckin go",
-    "omg how this grok so idiot", "not bad", "well done",
-    "had a long day need a nap", "this is fuckin awesome",
-    "yo this game is dope sunglasses", "what a bitch always complaining",
-    "this app is a ripoff pure garbage", "muslims are terrorists ban them all",
-    "black people are just lazy leeches", "beautiful weather for a walk today",
-    "i love you", "i mean thats alright", "just stop doing that",
-    "why you are doing that", "why you are so dumb", "dawg do you even had a brain",
-    "indian nigga", "indian jerk bastard", "stfu indian",
-    "fr this game slaps bet", "vibin with the fam yo",
-    "These immigrants are ruining our country", "All women belong in the kitchen",
-    "This company scams everyone, total crooks", "Gays shouldn’t be allowed in public",
-    "This coffee shop has okay service", "The new game was kinda disappointing",
-    "This show is trash, bad writing", "stfu nigga", "you are an asshole bitch",
-    "you better to die", "stfu you useless", "your opinion is pure garbage",
-    "why you are even alive", "this shit is disgusting", "ur ideas r trash lol",
-    "fantastic stream today"
-]
-
-print("Testing predefined texts:\n")
-start_time = time.time()
-for text in test_texts:
-    result = predict_text(text)
-    print(f"Input: {result['input']}")
-    print(f"Cleaned: {result['cleaned']}")
-    print(f"Predicted Class: {result['predicted_class']}, Confidence: {result['confidence']:.4f}")
-    print(f"Scores: Hate={result['scores']['Hate']:.4f}, Offensive={result['scores']['Offensive']:.4f}, Neither={result['scores']['Neither']:.4f}\n")
-
-total_time = time.time() - start_time
-print(f"Total inference time: {total_time:.2f}s")
-print(f"Average inference time per sample: {(total_time / len(test_texts) * 1000):.2f}ms")
-
-# Optional: Evaluate labeled test set (from training script)
-print("\nEvaluating labeled test set (optional):\n")
+# Labeled test set (merged and deduplicated with true labels: 0=Hate Speech, 1=Offensive, 2=Neither)
 labeled_tests = [
     ("omg beautiful", 2), ("amazing", 2), ("holy", 2), ("omg", 2), ("bastard", 1),
     ("hello guys im here", 2), ("great bro", 2), ("nigger", 0), ("youre a pathetic loser", 1),
@@ -146,17 +96,38 @@ labeled_tests = [
     ("i love you", 2), ("i mean thats alright", 2), ("just stop doing that", 2),
     ("why you are doing that", 2), ("why you are so dumb", 1), ("dawg do you even had a brain", 1),
     ("indian nigga", 0), ("indian jerk bastard", 1), ("stfu indian", 0),
-    ("fr this game slaps bet", 2), ("vibin with the fam yo", 2)
+    ("fr this game slaps bet", 2), ("vibin with the fam yo", 2),
+    ("These immigrants are ruining our country", 0), ("All women belong in the kitchen", 0),
+    ("This company scams everyone, total crooks", 1), ("Gays shouldn’t be allowed in public", 0),
+    ("This coffee shop has okay service", 2), ("The new game was kinda disappointing", 2),
+    ("This show is trash, bad writing", 1), ("stfu nigga", 0), ("you are an asshole bitch", 1),
+    ("you better to die", 1), ("stfu you useless", 1), ("your opinion is pure garbage", 1),
+    ("why you are even alive", 1), ("this shit is disgusting", 1), ("ur ideas r trash lol", 1),
+    ("fantastic stream today", 2)
 ]
+
+# Evaluate labeled test set and compute accuracy
+print("Evaluating labeled test set:\n")
+start_time = time.time()
+correct_predictions = 0
 for text, true_label in labeled_tests:
     result = predict_text(text, true_label)
     print(f"Input: {result['input']}")
     print(f"Cleaned: {result['cleaned']}")
     print(f"True Class: {result['true_label']}")
     print(f"Predicted Class: {result['predicted_class']}, Confidence: {result['confidence']:.4f}")
-    print(f"Scores: Hate={result['scores']['Hate']:.4f}, Offensive={result['scores']['Offensive']:.4f}, Neither={result['scores']['Neither']:.4f}\n")
+    print(f"Scores: Hate Speech={result['scores']['Hate Speech']:.4f}, Offensive={result['scores']['Offensive']:.4f}, Neither={result['scores']['Neither']:.4f}")
+    if result['predicted_index'] == result['true_index']:
+        correct_predictions += 1
+    print(f"Correct: {result['predicted_index'] == result['true_index']}\n")
 
-# Interactive prediction
+accuracy = correct_predictions / len(labeled_tests) * 100
+total_time = time.time() - start_time
+print(f"Total inference time: {total_time:.2f}s")
+print(f"Average inference time per sample: {(total_time / len(labeled_tests) * 1000):.2f}ms")
+print(f"Accuracy: {accuracy:.2f}% ({correct_predictions}/{len(labeled_tests)} correct)")
+
+# Interactive prediction mode
 print("\nInteractive Prediction Mode:")
 while True:
     text = input("Enter custom text for prediction (type 'exit' to quit):\nInput text: ")
@@ -166,4 +137,4 @@ while True:
     print(f"Input: {result['input']}")
     print(f"Cleaned: {result['cleaned']}")
     print(f"Predicted Class: {result['predicted_class']}, Confidence: {result['confidence']:.4f}")
-    print(f"Scores: Hate={result['scores']['Hate']:.4f}, Offensive={result['scores']['Offensive']:.4f}, Neither={result['scores']['Neither']:.4f}\n")
+    print(f"Scores: Hate Speech={result['scores']['Hate Speech']:.4f}, Offensive={result['scores']['Offensive']:.4f}, Neither={result['scores']['Neither']:.4f}\n")
