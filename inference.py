@@ -9,10 +9,48 @@ import warnings
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-# Suppress TensorFlow Lite deprecation warning
-warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow.lite.python.interpreter")
+# Suppress TensorFlow warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="tensorflow")
 
-# Slang normalization dictionary
+# =========================
+# ✅ REGISTER CUSTOM LAYER
+# =========================
+@tf.keras.utils.register_keras_serializable()
+class SimpleAttention(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(SimpleAttention, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        # Misalnya input: (batch, timesteps, features)
+        self.kernel = self.add_weight(name="kernel", shape=(input_shape[-1], 1),
+                                      initializer="glorot_uniform", trainable=True)
+        self.bias = self.add_weight(name="bias", shape=(input_shape[1], 1),
+                                    initializer="zeros", trainable=True)
+        super(SimpleAttention, self).build(input_shape)
+
+    def call(self, inputs):
+        # Compute attention scores
+        e = tf.keras.backend.tanh(tf.tensordot(inputs, self.kernel, axes=1) + self.bias)
+        alpha = tf.keras.backend.softmax(e, axis=1)
+        context = tf.reduce_sum(alpha * inputs, axis=1)
+        return context
+
+# =========================
+# ✅ REGISTER CUSTOM LOSS
+# =========================
+@tf.keras.utils.register_keras_serializable()
+def focal_loss_fn(y_true, y_pred, gamma=2.0, alpha=0.25):
+    y_true = tf.cast(y_true, tf.float32)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+    cross_entropy = -y_true * tf.math.log(y_pred)
+    weight = alpha * tf.pow(1 - y_pred, gamma)
+    loss = weight * cross_entropy
+    return tf.reduce_sum(loss, axis=1)
+
+# =========================
+# 🔤 Slang Normalization
+# =========================
 slang_dict = {
     'wtf': 'what the fuck', 'lol': 'laughing out loud', 'fr': 'for real', 'tbh': 'to be honest',
     'fucking': 'fuckin', 'fuckinng': 'fuckin', 'ur': 'your', 'r': 'are',
@@ -22,7 +60,6 @@ slang_dict = {
     'slaps': 'great', 'cap': 'lie', 'bet': 'okay'
 }
 
-# Clean text function
 def clean_text(text):
     if pd.isna(text) or not isinstance(text, str):
         return ''
@@ -35,7 +72,9 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# Load tokenizer
+# =========================
+# 🔃 Load Tokenizer
+# =========================
 try:
     with open('model/lstm/tokenizer.pkl', 'rb') as handle:
         tokenizer = pickle.load(handle)
@@ -43,35 +82,37 @@ except FileNotFoundError:
     print("Error: tokenizer.pkl not found. Ensure the training script has run successfully.")
     exit(1)
 
-# Configuration
+# =========================
+# ⚙️ Configuration
+# =========================
 max_length = 30
 vocab_size = 20000
 
-# Load TFLite model
+# =========================
+# ✅ Load Keras Model
+# =========================
 try:
-    interpreter = tf.lite.Interpreter(model_path='model/lstm/lstm_model.tflite')
-    interpreter.allocate_tensors()
-except ValueError as e:
-    print(f"Error: Failed to load lstm_model.tflite. Ensure the training script has run successfully. Details: {e}")
+    model = tf.keras.models.load_model('model/lstm/lstm_model.keras')
+except Exception as e:
+    print(f"Error loading keras model: {e}")
     exit(1)
 
-# Get input and output details
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-# Prediction function
+# =========================
+# 🧠 Prediction Function
+# =========================
 def predict_text(text, true_label=None):
     cleaned_text = clean_text(text)
     sequence = tokenizer.texts_to_sequences([cleaned_text])
     padded = np.clip(pad_sequences(sequence, maxlen=max_length, padding='post', truncating='post'), 0, vocab_size - 1)
-    interpreter.set_tensor(input_details[0]['index'], padded.astype(np.float32))
-    interpreter.invoke()
-    probs = interpreter.get_tensor(output_details[0]['index'])[0]
+    
+    probs = model.predict(padded, verbose=0)[0]
     class_names = ['Hate Speech', 'Offensive', 'Neither']
     pred_class = class_names[np.argmax(probs)]
     confidence = probs[np.argmax(probs)]
+    
     if confidence < 0.5:
         print(f"Warning: Low confidence prediction ({confidence:.4f}) for '{text}'")
+
     return {
         'input': text,
         'cleaned': cleaned_text,
@@ -83,7 +124,9 @@ def predict_text(text, true_label=None):
         'true_index': true_label
     }
 
-# Labeled test set (merged and deduplicated with true labels: 0=Hate Speech, 1=Offensive, 2=Neither)
+# =========================
+# 🧪 Evaluation Dataset
+# =========================
 labeled_tests = [
     ("omg beautiful", 2), ("amazing", 2), ("holy", 2), ("omg", 2), ("bastard", 1),
     ("hello guys im here", 2), ("great bro", 2), ("nigger", 0), ("youre a pathetic loser", 1),
@@ -106,7 +149,9 @@ labeled_tests = [
     ("fantastic stream today", 2)
 ]
 
-# Evaluate labeled test set and compute accuracy
+# =========================
+# ✅ Evaluation
+# =========================
 print("Evaluating labeled test set:\n")
 start_time = time.time()
 correct_predictions = 0
@@ -127,7 +172,9 @@ print(f"Total inference time: {total_time:.2f}s")
 print(f"Average inference time per sample: {(total_time / len(labeled_tests) * 1000):.2f}ms")
 print(f"Accuracy: {accuracy:.2f}% ({correct_predictions}/{len(labeled_tests)} correct)")
 
-# Interactive prediction mode
+# =========================
+# 💬 Interactive Mode
+# =========================
 print("\nInteractive Prediction Mode:")
 while True:
     text = input("Enter custom text for prediction (type 'exit' to quit):\nInput text: ")

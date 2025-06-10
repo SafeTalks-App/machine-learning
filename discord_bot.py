@@ -4,124 +4,171 @@ import tensorflow as tf
 import numpy as np
 import pickle
 import re
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from dotenv import load_dotenv
+import emoji
+import pandas as pd
 import os
+from dotenv import load_dotenv
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-# Load file .env
+# =========================
+# ✅ REGISTER CUSTOM LAYER & LOSS
+# =========================
+@tf.keras.utils.register_keras_serializable()
+class SimpleAttention(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(SimpleAttention, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.kernel = self.add_weight(name="kernel", shape=(input_shape[-1], 1),
+                                      initializer="glorot_uniform", trainable=True)
+        self.bias = self.add_weight(name="bias", shape=(input_shape[1], 1),
+                                    initializer="zeros", trainable=True)
+        super(SimpleAttention, self).build(input_shape)
+
+    def call(self, inputs):
+        e = tf.keras.backend.tanh(tf.tensordot(inputs, self.kernel, axes=1) + self.bias)
+        alpha = tf.keras.backend.softmax(e, axis=1)
+        context = tf.reduce_sum(alpha * inputs, axis=1)
+        return context
+
+@tf.keras.utils.register_keras_serializable()
+def focal_loss_fn(y_true, y_pred, gamma=2.0, alpha=0.25):
+    y_true = tf.cast(y_true, tf.float32)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+    cross_entropy = -y_true * tf.math.log(y_pred)
+    weight = alpha * tf.pow(1 - y_pred, gamma)
+    loss = weight * cross_entropy
+    return tf.reduce_sum(loss, axis=1)
+
+# =========================
+# 🔤 Normalisasi Slang
+# =========================
+slang_dict = {
+    'wtf': 'what the fuck', 'lol': 'laughing out loud', 'fr': 'for real', 'tbh': 'to be honest',
+    'fucking': 'fuckin', 'fuckinng': 'fuckin', 'ur': 'your', 'r': 'are',
+    'omg': 'oh my god', 'dope': 'great', 'lit': 'great', 'nigga': 'nigga',
+    'pussi': 'pussy', 'hoe': 'ho', 'fam': 'friends', 'dawg': 'friend',
+    'stfu': 'shut up', 'yo': 'hey', 'vibin': 'vibing', 'chill': 'relax',
+    'slaps': 'great', 'cap': 'lie', 'bet': 'okay'
+}
+
+def clean_text(text):
+    if pd.isna(text) or not isinstance(text, str):
+        return ''
+    text = text.lower()
+    text = emoji.demojize(text, delimiters=(' ', ' '))
+    text = re.sub(r'http\S+|www\S+', '', text)
+    text = re.sub(r'[^a-zA-Z\s!?]', '', text)
+    for slang, full in slang_dict.items():
+        text = re.sub(r'\b' + slang + r'\b', full, text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# =========================
+# 🔃 Load Tokenizer & Model
+# =========================
+try:
+    with open('model/lstm/tokenizer.pkl', 'rb') as handle:
+        tokenizer = pickle.load(handle)
+except FileNotFoundError:
+    print("Error: tokenizer.pkl not found.")
+    exit(1)
+
+try:
+    model = tf.keras.models.load_model('model/lstm/lstm_model.keras')
+except Exception as e:
+    print(f"Error loading keras model: {e}")
+    exit(1)
+
+# =========================
+# ⚙️ Konfigurasi
+# =========================
+vocab_size = 20000
+max_length = 30
+
+# =========================
+# 🤖 Discord Bot Setup
+# =========================
 load_dotenv()
-
-# Ambil variabel dari environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Model configuration
-vocab_size = 20000
-max_length = 30
-oov_token = '<OOV>'
-
-# Emoji preprocessing
-emoji_dict = {
-    r'[:\)\(]+': 'emoji_positive',
-    r'[:\+\-\|\/]+': 'emoji_neutral',
-    r'[:\(]+': 'emoji_negative',
-    r'[😊👍🌟😎]': 'emoji_positive',
-    r'[😢😣😠😤]': 'emoji_negative',
-    r'[😏🤔🤷]': 'emoji_neutral'
-}
-
-def preprocess_emojis(text):
-    for pattern, replacement in emoji_dict.items():
-        text = re.sub(pattern, f' {replacement} ', text)
-    return text
-
-# Load tokenizer
-with open('model/lstm/tokenizer.pkl', 'rb') as handle:
-    tokenizer = pickle.load(handle)
-
-# Load TFLite model (LSTM only)
-interpreter = tf.lite.Interpreter(model_path='model/lstm/lstm_model.tflite')
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-def preprocess_text(text):
-    text = text.lower()
-    text = re.sub(r'http\S+|www\S+', '', text)
-    text = preprocess_emojis(text)
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    sequence = tokenizer.texts_to_sequences([text])
-    padded = pad_sequences(sequence, maxlen=max_length, padding='post', truncating='post')
-    return padded
-
+# =========================
+# 🧠 Fungsi Prediksi
+# =========================
 def predict_text(text):
-    padded = preprocess_text(text)
-    padded = padded.astype(np.float32)  # Gunakan float32 jika model TFLite dinamis
+    cleaned_text = clean_text(text)
+    sequence = tokenizer.texts_to_sequences([cleaned_text])
+    padded = np.clip(pad_sequences(sequence, maxlen=max_length, padding='post', truncating='post'), 0, vocab_size - 1)
+    
+    probs = model.predict(padded, verbose=0)[0]
+    class_names = ['Hate Speech', 'Offensive', 'Neither']
+    pred_class = class_names[np.argmax(probs)]
+    confidence = probs[np.argmax(probs)]
 
-    interpreter.set_tensor(input_details[0]['index'], padded)
-    interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]['index'])
+    return {
+        'cleaned': cleaned_text,
+        'predicted_class': pred_class,
+        'confidence': float(confidence),
+        'scores': {'Hate Speech': float(probs[0]), 'Offensive': float(probs[1]), 'Neither': float(probs[2])}
+    }
 
-    pred_class = np.argmax(output, axis=1)[0]
-    confidence = output[0][pred_class]
-    class_names = {0: 'Hate Speech', 1: 'Offensive', 2: 'Neither'}
-    return class_names[pred_class], confidence, output[0]
-
+# =========================
+# 📩 Event Handling
+# =========================
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user}')
+    print(f'Bot logged in as {bot.user}')
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
-    text = message.content
-    pred_class, confidence, scores = predict_text(text)
+    content = message.content
 
-    # Cari channel bernama "general"
-    mod_channel = discord.utils.get(message.guild.text_channels, name="general")
+    # ✅ Command manual test
+    if content.startswith("!test "):
+        test_text = content[6:].strip()
+        result = predict_text(test_text)
 
-    # Kalau nggak ada, pakai channel pertama yang bisa dikirim pesan
-    if mod_channel is None:
-        for channel in message.guild.text_channels:
-            if channel.permissions_for(message.guild.me).send_messages:
-                mod_channel = channel
-                break
-
-    if mod_channel is None:
-        print("❌ ERROR: Tidak ada channel yang bisa dikirim pesan.")
+        await message.channel.send(
+            f'📊 **Prediction Test**\n'
+            f'**Original:** {test_text}\n'
+            f'**Cleaned:** {result["cleaned"]}\n'
+            f'**Class:** {result["predicted_class"]} ({result["confidence"]:.2f})\n'
+            f'**Scores:**\n'
+            f'   • Hate Speech: {result["scores"]["Hate Speech"]:.4f}\n'
+            f'   • Offensive: {result["scores"]["Offensive"]:.4f}\n'
+            f'   • Neither: {result["scores"]["Neither"]:.4f}'
+        )
         return
 
-    # Moderation logic
-    if pred_class == 'Hate Speech' and confidence > 0.85:
+    # 🔮 Auto prediction
+    result = predict_text(content)
+    predicted_class = result["predicted_class"]
+    confidence = result["confidence"]
+
+    # ⚠️ Automated moderation
+    if predicted_class == "Hate Speech" and confidence >= 0.80:
         await message.delete()
         await message.channel.send(
-            f'{message.author.mention}, your message was removed due to hate speech (confidence: {confidence:.2f}).'
+            f'🚫 Message from {message.author.mention} was removed due to **Hate Speech**.'
         )
-        await mod_channel.send(
-            f'Hate Speech detected: "{text}" by {message.author} (confidence: {confidence:.2f})'
-        )
-    elif pred_class == 'Offensive' and confidence > 0.85:
-        await message.delete()
+    elif predicted_class == "Offensive" and confidence >= 0.85:
         await message.channel.send(
-            f'{message.author.mention}, your message was removed due to offensive language (confidence: {confidence:.2f}).'
-        )
-        await mod_channel.send(
-            f'Offensive detected: "{text}" by {message.author} (confidence: {confidence:.2f})'
-        )
-    elif confidence < 0.85:
-        await mod_channel.send(
-            f'Low-confidence prediction: "{text}" by {message.author} '
-            f'(class: {pred_class}, confidence: {confidence:.2f}, scores: {scores})'
+            f'⚠️ Warning to {message.author.mention}: your message contains **Offensive Content**.'
         )
 
     await bot.process_commands(message)
 
-# Run bot
+
+# =========================
+# 🚀 Run Bot
+# =========================
 bot.run(BOT_TOKEN)
